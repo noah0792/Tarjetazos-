@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mis Tarjetas NI</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="icon.png">
+<link rel="apple-touch-icon" href="icon.png">
+<meta name="theme-color" content="#1f2a44">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Tarjetas NI">
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: #f2f4f8; margin: 0; padding: 16px; color: #222; }
+  h1 { font-size: 22px; margin: 4px 0 14px; }
+  h2 { font-size: 18px; margin: 0 0 10px; }
+  .sec { background: #fff; border-radius: 14px; padding: 16px; margin-bottom: 18px; box-shadow: 0 2px 8px rgba(0,0,0,.07); }
+  .head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .logo { position: relative; width: 56px; height: 56px; border-radius: 12px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 700; font-size: 12px; overflow: hidden; flex-shrink: 0; }
+  .logo img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #fff; padding: 6px; }
+  .small { color: #666; font-size: 13px; }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 10px 0; }
+  .stat { background: #f2f4f8; border-radius: 10px; padding: 10px; }
+  .stat small { color: #666; display: block; font-size: 12px; }
+  .stat b { font-size: 16px; }
+  .ok { color: #1a7f37; } .warn { color: #b35c00; } .bad { color: #c62828; }
+  form { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  input, select, button { padding: 9px; border-radius: 8px; border: 1px solid #c9ced8; font-size: 15px; }
+  input[type=text] { flex: 2; min-width: 120px; }
+  input[type=number] { flex: 1; min-width: 90px; }
+  input[type=date] { flex: 1; min-width: 130px; }
+  select { flex: 1; min-width: 130px; background: #fff; }
+  button { background: #1f5fbf; color: #fff; border: none; cursor: pointer; }
+  button.gris { background: #6b7280; }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 14px; }
+  th, td { padding: 6px 4px; border-bottom: 1px solid #eee; text-align: left; }
+  td.num, th.num { text-align: right; }
+  .del { background: none; color: #c62828; padding: 0 6px; font-size: 16px; }
+  .sub { margin-top: 12px; font-weight: 600; font-size: 14px; }
+  .resumen { background: #1f2a44; color: #fff; }
+  .resumen .small { color: #cfd6e4; }
+  input[type=checkbox] { flex: none; min-width: auto; width: 18px; height: 18px; }
+</style>
+</head>
+<body>
+
+<h1>💳 Mis Tarjetas NI</h1>
+<div id="app"></div>
+
+<script>
+// ---------- Configuración de tarjetas ----------
+// corte = día de corte, pago = día de pago. Colores de referencia de cada banco.
+// Para usar logos reales, guarda la imagen en la carpeta "logos" con el nombre indicado.
+const CARDS = [
+  { id: 'banpro_walmart', name: 'Banpro Walmart', banco: 'Banpro', color: '#0055a5', logo: 'banpro.png', corte: 12, pago: 7 },
+  { id: 'bac_colonia', name: 'BAC Credomatic Colonia', banco: 'BAC', color: '#c8102e', logo: 'bac.png', corte: 9, pago: 30 },
+  { id: 'banpro_uno', name: 'Banpro UNO', banco: 'Banpro', color: '#0055a5', logo: 'banpro_uno.png', corte: 7, pago: 2 }
+];
+
+const KEY = 'tarjetasNI_v1';
+let db = JSON.parse(localStorage.getItem(KEY) || 'null') || { accounts: [], cards: {} };
+CARDS.forEach(c => { if (!db.cards[c.id]) db.cards[c.id] = { purchases: [], payments: [] }; });
+db.efectivo = db.efectivo || [];
+db.divisas = db.divisas || { NIO: 0, USD: 0 };
+db.tc = db.tc || 36.6; // tipo de cambio editable (C$ por US$)
+
+// ---------- Utilidades de fecha ----------
+const pad = n => String(n).padStart(2, '0');
+const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const parseYmd = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+const diasEnMes = (y, m) => new Date(y, m + 1, 0).getDate();
+function fechaDia(y, m, dia) {
+  const base = new Date(y, m, 1);
+  const yy = base.getFullYear(), mm = base.getMonth();
+  return new Date(yy, mm, Math.min(dia, diasEnMes(yy, mm)));
+}
+// Fecha de corte a la que pertenece una compra
+function cortePara(card, d) {
+  let c = fechaDia(d.getFullYear(), d.getMonth(), card.corte);
+  if (d > c) c = fechaDia(d.getFullYear(), d.getMonth() + 1, card.corte);
+  return c;
+}
+// Fecha de pago del ciclo: primer día de pago posterior al corte
+function pagoPara(card, corte) {
+  let p = fechaDia(corte.getFullYear(), corte.getMonth(), card.pago);
+  if (p <= corte) p = fechaDia(corte.getFullYear(), corte.getMonth() + 1, card.pago);
+  return p;
+}
+function diasDesde(d) {
+  const hoy = new Date(); hoy.setHours(0, 0, 0, 0);
+  return Math.round((d - hoy) / 86400000);
+}
+const fmtFecha = d => d.toLocaleDateString('es-NI', { day: 'numeric', month: 'short', year: 'numeric' });
+const money = n => 'C$ ' + Number(n).toLocaleString('es-NI', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+function diasCorteTxt(n) { return n === 0 ? 'Hoy es el corte' : `Faltan ${n} días`; }
+function diasPagoTxt(n) {
+  if (n < 0) return `<span class="bad">Vencido hace ${-n} días</span>`;
+  if (n === 0) return `<span class="bad">Vence HOY</span>`;
+  const cls = n <= 3 ? 'warn' : 'ok';
+  return `<span class="${cls}">Faltan ${n} días para pagar</span>`;
+}
+
+// ---------- Cálculo de ciclos y saldos acumulados ----------
+// Los pagos se aplican a los ciclos más antiguos primero (FIFO).
+function ciclos(card) {
+  const data = db.cards[card.id];
+  const porCorte = {};
+  data.purchases.forEach(p => {
+    const k = ymd(cortePara(card, parseYmd(p.date)));
+    porCorte[k] = (porCorte[k] || 0) + p.amount;
+  });
+  let pagado = data.payments.reduce((s, x) => s + x.amount, 0);
+  return Object.keys(porCorte).sort().map(k => {
+    const total = porCorte[k];
+    const aplicado = Math.min(total, pagado);
+    pagado -= aplicado;
+    const corte = parseYmd(k);
+    return { corte, total, pendiente: total - aplicado, pago: pagoPara(card, corte) };
+  });
+}
+
+// ---------- Render ----------
+function render() {
+  const hoy = new Date();
+  let totalTarjetas = 0;
+  let html = '';
+
+  CARDS.forEach(card => {
+    const data = db.cards[card.id];
+    const cic = ciclos(card);
+    const pendientes = cic.filter(c => c.pendiente > 0.005);
+    const masAntiguo = pendientes[0];
+    const saldo = pendientes.reduce((s, c) => s + c.pendiente, 0);
+    totalTarjetas += saldo;
+
+    const proximoCorte = cortePara(card, hoy);
+    const fechaLimite = masAntiguo ? masAntiguo.pago : pagoPara(card, proximoCorte);
+    const dLimite = diasDesde(fechaLimite);
+
+    const compras = [...data.purchases].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 10);
+    const pagos = [...data.payments].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
+    const opcionesCuenta = db.accounts.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
+
+    html += `
+    <section class="sec">
+      <div class="head">
+        <div class="logo" style="background:${card.color}">
+          <img src="logos/${card.logo}" onerror="this.remove()" alt="">
+          <span>${card.banco}</span>
+        </div>
+        <div>
+          <h2 style="margin:0">${esc(card.name)}</h2>
+          <div class="small">Corte día ${card.corte} · Pago día ${card.pago}</div>
+        </div>
+      </div>
+
+      <div class="stats">
+        <div class="stat"><small>Próximo corte</small><b>${fmtFecha(proximoCorte)}</b><br><span class="small">${diasCorteTxt(diasDesde(proximoCorte))}</span></div>
+        <div class="stat"><small>${masAntiguo ? 'Fecha límite de pago' : 'Próximo pago'}</small><b>${fmtFecha(fechaLimite)}</b><br><span class="small">${diasPagoTxt(dLimite)}</span></div>
+        <div class="stat"><small>Saldo acumulado pendiente</small><b>${money(saldo)}</b></div>
+        <div class="stat"><small>Ciclo más antiguo sin pagar</small><b>${masAntiguo ? money(masAntiguo.pendiente) : 'C$ 0.00'}</b></div>
+      </div>
+
+      <div class="sub">Registrar gasto</div>
+      <form data-act="gasto" data-id="${card.id}">
+        <input type="text" name="desc" placeholder="Ej: Walmart compras">
+        <input type="number" name="monto" step="0.01" min="0" placeholder="Monto" required>
+        <input type="date" name="fecha" value="${ymd(hoy)}" required>
+        <button type="submit">Agregar gasto</button>
+      </form>
+
+      <div class="sub">Registrar pago a la tarjeta</div>
+      <form data-act="pago" data-id="${card.id}">
+        <input type="number" name="monto" step="0.01" min="0" placeholder="Monto pagado" required>
+        <input type="date" name="fecha" value="${ymd(hoy)}" required>
+        <select name="cuenta"><option value="">Sin cuenta</option>${opcionesCuenta}</select>
+        <button type="submit" class="gris">Registrar pago</button>
+      </form>
+
+      <div class="sub">Ciclos (corte y pago)</div>
+      ${cic.length ? `
+      <table>
+        <tr><th>Corte</th><th>Pago</th><th class="num">Total</th><th class="num">Pendiente</th></tr>
+        ${cic.map(c => `<tr>
+          <td>${fmtFecha(c.corte)}</td>
+          <td>${fmtFecha(c.pago)}</td>
+          <td class="num">${money(c.total)}</td>
+          <td class="num ${c.pendiente > 0.005 ? 'bad' : 'ok'}">${money(c.pendiente)}</td>
+        </tr>`).join('')}
+      </table>` : '<div class="small">Sin gastos registrados.</div>'}
+
+      <div class="sub">Últimos gastos</div>
+      ${compras.length ? `
+      <table>
+        ${compras.map(p => `<tr>
+          <td>${fmtFecha(parseYmd(p.date))}</td>
+          <td>${esc(p.desc)}</td>
+          <td class="num">${money(p.amount)}</td>
+          <td><button class="del" data-del="gasto|${card.id}|${p.id}" title="Eliminar">✕</button></td>
+        </tr>`).join('')}
+      </table>` : '<div class="small">Sin gastos.</div>'}
+
+      ${pagos.length ? `
+      <div class="sub">Últimos pagos</div>
+      <table>
+        ${pagos.map(p => {
+          const cta = db.accounts.find(a => a.id === p.accountId);
+          return `<tr>
+            <td>${fmtFecha(parseYmd(p.date))}</td>
+            <td>${cta ? 'desde ' + esc(cta.name) : 'Pago'}</td>
+            <td class="num">${money(p.amount)}</td>
+            <td><button class="del" data-del="pago|${card.id}|${p.id}" title="Eliminar">✕</button></td>
+          </tr>`;
+        }).join('')}
+      </table>` : ''}
+    </section>`;
+  });
+
+  // Cuentas bancarias / efectivo
+  const totalCuentas = db.accounts.reduce((s, a) => s + a.balance, 0);
+  html += `
+  <section class="sec">
+    <h2>Mis cuentas</h2>
+    ${db.accounts.length ? `
+    <table>
+      ${db.accounts.map(a => `<tr>
+        <td><b>${esc(a.name)}</b></td>
+        <td class="num ${a.balance < 0 ? 'bad' : ''}">${money(a.balance)}</td>
+        <td><button class="del" data-del="cuenta|${a.id}" title="Eliminar">✕</button></td>
+      </tr>
+      <tr><td colspan="3">
+        <form data-act="mov" data-id="${a.id}" style="margin:4px 0 10px">
+          <input type="number" name="monto" step="0.01" min="0" placeholder="Monto" required>
+          <select name="tipo"><option value="ingreso">Ingreso (+)</option><option value="gasto">Restar (−)</option></select>
+          <button type="submit" class="gris">Aplicar</button>
+        </form>
+      </td></tr>`).join('')}
+    </table>` : '<div class="small">Aún no tienes cuentas. Agrega una abajo.</div>'}
+
+    <div class="sub">Nueva cuenta</div>
+    <form data-act="cuenta">
+      <input type="text" name="nombre" placeholder="Ej: Banpro cuenta, Efectivo" required>
+      <input type="number" name="monto" step="0.01" placeholder="Saldo inicial">
+      <button type="submit">Agregar cuenta</button>
+    </form>
+  </section>`;
+
+  html += efectivoHTML();
+
+  // Resumen general
+  html = `
+  <section class="sec resumen">
+    <div class="small">Saldo total pendiente en tarjetas</div>
+    <h2 style="font-size:24px;margin:4px 0 8px">${money(totalTarjetas)}</h2>
+    <div class="small">Total en cuentas: ${money(totalCuentas)}</div>
+  </section>` + html;
+
+  document.getElementById('app').innerHTML = html;
+}
+
+function efectivoHTML() {
+  const hoy = new Date();
+  const lista = [...db.efectivo].sort((a, b) => b.date.localeCompare(a.date));
+  const pendiente = { NIO: 0, USD: 0 };
+  db.efectivo.forEach(e => { if (!e.repuesto) pendiente[e.moneda] += e.amount; });
+  const fmt = (m, n) => m === 'USD'
+    ? 'US$ ' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    : money(n);
+  const tc = db.tc;
+  const totalC = db.divisas.NIO + db.divisas.USD * tc;
+
+  return `
+  <section class="sec">
+    <div class="head">
+      <div class="logo" style="background:#2e7d32"><span>💵</span></div>
+      <div>
+        <h2 style="margin:0">Gastos en efectivo</h2>
+        <div class="small">Marca la casilla cuando repongas el dinero</div>
+      </div>
+    </div>
+    <div class="stats">
+      <div class="stat"><small>Pendiente por reponer (C$)</small><b>${money(pendiente.NIO)}</b></div>
+      <div class="stat"><small>Pendiente por reponer (US$)</small><b>${fmt('USD', pendiente.USD)}</b></div>
+    </div>
+
+    <div class="sub">Registrar gasto en efectivo</div>
+    <form data-act="efectivo">
+      <input type="text" name="desc" placeholder="Ej: Mercado, taxi">
+      <input type="number" name="monto" step="0.01" min="0" placeholder="Monto" required>
+      <select name="moneda"><option value="NIO">C$ (córdobas)</option><option value="USD">US$ (dólares)</option></select>
+      <input type="date" name="fecha" value="${ymd(hoy)}" required>
+      <label class="small" style="display:flex;align-items:center;gap:6px;"><input type="checkbox" name="repuesto"> Ya repuse el dinero</label>
+      <button type="submit">Agregar</button>
+    </form>
+
+    ${lista.length ? `
+    <table>
+      <tr><th>Fecha</th><th>Descripción</th><th class="num">Monto</th><th>Repuesto</th><th></th></tr>
+      ${lista.map(e => `<tr>
+        <td>${fmtFecha(parseYmd(e.date))}</td>
+        <td>${esc(e.desc)}</td>
+        <td class="num">${fmt(e.moneda, e.amount)}</td>
+        <td><input type="checkbox" data-tog="${e.id}" ${e.repuesto ? 'checked' : ''}> <span class="${e.repuesto ? 'ok' : 'warn'}">${e.repuesto ? 'Sí' : 'No'}</span></td>
+        <td><button class="del" data-del="efe|${e.id}" title="Eliminar">✕</button></td>
+      </tr>`).join('')}
+    </table>` : '<div class="small">Sin gastos en efectivo.</div>'}
+  </section>
+
+  <section class="sec">
+    <h2>Dólares y córdobas</h2>
+    <div class="stats">
+      <div class="stat"><small>Córdobas (C$)</small><b>${money(db.divisas.NIO)}</b></div>
+      <div class="stat"><small>Dólares (US$)</small><b>${fmt('USD', db.divisas.USD)}</b></div>
+    </div>
+    <div class="small">Total equivalente en C$: <b>${money(totalC)}</b></div>
+
+    <div class="sub">Ajustar saldo en córdobas</div>
+    <form data-act="divisa" data-id="NIO">
+      <input type="number" name="monto" step="0.01" min="0" placeholder="Monto C$" required>
+      <select name="tipo"><option value="ingreso">Agregar (+)</option><option value="gasto">Restar (−)</option></select>
+      <button type="submit" class="gris">Aplicar</button>
+    </form>
+
+    <div class="sub">Ajustar saldo en dólares</div>
+    <form data-act="divisa" data-id="USD">
+      <input type="number" name="monto" step="0.01" min="0" placeholder="Monto US$" required>
+      <select name="tipo"><option value="ingreso">Agregar (+)</option><option value="gasto">Restar (−)</option></select>
+      <button type="submit" class="gris">Aplicar</button>
+    </form>
+
+    <div class="sub">Tipo de cambio (C$ por US$)</div>
+    <form data-act="tc">
+      <input type="number" name="tc" step="0.01" min="0" value="${tc}" required>
+      <button type="submit" class="gris">Guardar</button>
+    </form>
+  </section>`;
+}
+
+function guardar() {
+  localStorage.setItem(KEY, JSON.stringify(db));
+  render();
+}
+
+// ---------- Eventos ----------
+document.addEventListener('submit', e => {
+  e.preventDefault();
+  const f = e.target;
+  const act = f.dataset.act;
+  const id = f.dataset.id;
+  const fd = new FormData(f);
+  const monto = parseFloat(fd.get('monto'));
+
+  if (act === 'gasto') {
+    if (!(monto > 0)) return;
+    db.cards[id].purchases.push({ id: uid(), date: fd.get('fecha'), desc: fd.get('desc') || 'Gasto', amount: monto });
+  }
+  if (act === 'pago') {
+    if (!(monto > 0)) return;
+    const cta = db.accounts.find(a => a.id === fd.get('cuenta'));
+    if (cta) cta.balance -= monto;
+    db.cards[id].payments.push({ id: uid(), date: fd.get('fecha'), amount: monto, accountId: cta ? cta.id : null });
+  }
+  if (act === 'cuenta') {
+    db.accounts.push({ id: uid(), name: fd.get('nombre'), balance: isNaN(monto) ? 0 : monto });
+  }
+  if (act === 'mov') {
+    const cta = db.accounts.find(a => a.id === id);
+    if (!cta || !(monto > 0)) return;
+    cta.balance += fd.get('tipo') === 'ingreso' ? monto : -monto;
+  }
+  if (act === 'efectivo') {
+    if (!(monto > 0)) return;
+    db.efectivo.push({
+      id: uid(), date: fd.get('fecha'), desc: fd.get('desc') || 'Gasto en efectivo',
+      amount: monto, moneda: fd.get('moneda'), repuesto: fd.get('repuesto') === 'on'
+    });
+  }
+  if (act === 'divisa') {
+    if (!(monto > 0)) return;
+    db.divisas[id] += fd.get('tipo') === 'ingreso' ? monto : -monto;
+  }
+  if (act === 'tc') {
+    const v = parseFloat(fd.get('tc'));
+    if (v > 0) db.tc = v;
+  }
+  guardar();
+});
+
+// Casilla "ya repuse el dinero"
+document.addEventListener('change', e => {
+  const id = e.target.dataset.tog;
+  if (!id) return;
+  const x = db.efectivo.find(y => y.id === id);
+  if (x) { x.repuesto = e.target.checked; guardar(); }
+});
+
+document.addEventListener('click', e => {
+  const del = e.target.dataset.del;
+  if (!del) return;
+  const [tipo, a, b] = del.split('|');
+  if (tipo === 'gasto') {
+    db.cards[a].purchases = db.cards[a].purchases.filter(x => x.id !== b);
+  } else if (tipo === 'pago') {
+    const p = db.cards[a].payments.find(x => x.id === b);
+    if (p && p.accountId) {
+      const cta = db.accounts.find(x => x.id === p.accountId);
+      if (cta) cta.balance += p.amount; // devuelve el dinero a la cuenta
+    }
+    db.cards[a].payments = db.cards[a].payments.filter(x => x.id !== b);
+  } else if (tipo === 'efe') {
+    db.efectivo = db.efectivo.filter(x => x.id !== a);
+  } else if (tipo === 'cuenta') {
+    db.accounts = db.accounts.filter(x => x.id !== a);
+  }
+  guardar();
+});
+
+render();
+</script>
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./sw.js').catch(err => console.warn('SW no registrado:', err));
+    });
+  }
+</script>
+</body>
+</html>

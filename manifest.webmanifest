@@ -1,0 +1,19 @@
+{
+  "name": "Mis Tarjetas NI",
+  "short_name": "Tarjetas NI",
+  "description": "Control de tarjetas, cortes, pagos, efectivo y cuentas",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f2f4f8",
+  "theme_color": "#1f2a44",
+  "lang": "es-NI",
+  "icons": [
+    {
+      "src": "icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
